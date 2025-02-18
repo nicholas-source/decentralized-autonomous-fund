@@ -195,3 +195,117 @@
         )
     )
 )
+
+;; Creates a new proposal
+(define-public (create-proposal 
+    (description (string-ascii 256))
+    (amount uint)
+    (target principal)
+    (duration uint)
+)
+    (begin
+        (try! (check-initialized))
+        
+        ;; Validate inputs
+        (asserts! (> (len description) u0) err-invalid-description)
+        (asserts! (> amount u0) err-zero-amount)
+        (asserts! (not (is-eq target (as-contract tx-sender))) err-invalid-target)
+        (asserts! (and (>= duration minimum-duration) (<= duration maximum-duration)) err-invalid-duration)
+        
+        (let (
+            (proposer-balance (unwrap! (map-get? balances tx-sender) err-unauthorized))
+            (proposal-id (+ (var-get proposal-count) u1))
+        )
+            (asserts! (> proposer-balance u0) err-unauthorized)
+            
+            ;; Create proposal
+            (map-set proposals proposal-id {
+                proposer: tx-sender,
+                description: description,
+                amount: amount,
+                target: target,
+                expires-at: (+ block-height duration),
+                executed: false,
+                yes-votes: u0,
+                no-votes: u0
+            })
+            
+            (var-set proposal-count proposal-id)
+            (ok proposal-id)
+        )
+    )
+)
+
+;; Casts a vote on a proposal
+(define-public (vote (proposal-id uint) (vote-for bool))
+    (begin
+        (try! (check-initialized))
+        
+        (let (
+            (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
+            (voter-power (calculate-voting-power tx-sender))
+        )
+            (asserts! (> voter-power u0) err-unauthorized)
+            (asserts! (< block-height (get expires-at proposal)) err-proposal-expired)
+            (asserts! (is-none (map-get? votes {proposal-id: proposal-id, voter: tx-sender})) err-already-voted)
+            
+            ;; Record vote
+            (map-set votes {proposal-id: proposal-id, voter: tx-sender} vote-for)
+            
+            ;; Update tallies
+            (map-set proposals proposal-id 
+                (merge proposal 
+                    {
+                        yes-votes: (if vote-for 
+                            (+ (get yes-votes proposal) voter-power)
+                            (get yes-votes proposal)),
+                        no-votes: (if vote-for
+                            (get no-votes proposal)
+                            (+ (get no-votes proposal) voter-power))
+                    }
+                )
+            )
+            
+            (ok true)
+        )
+    )
+)
+
+;; Executes an approved proposal
+(define-public (execute-proposal (proposal-id uint))
+    (begin
+        (try! (check-initialized))
+        
+        (let (
+            (proposal (unwrap! (map-get? proposals proposal-id) err-proposal-not-found))
+        )
+            (asserts! (not (get executed proposal)) err-unauthorized)
+            (asserts! (>= block-height (get expires-at proposal)) err-proposal-expired)
+            (asserts! (> (get yes-votes proposal) (get no-votes proposal)) err-unauthorized)
+            
+            ;; Execute proposal
+            (try! (as-contract (stx-transfer? (get amount proposal) (as-contract tx-sender) (get target proposal))))
+            
+            ;; Update status
+            (map-set proposals proposal-id (merge proposal {executed: true}))
+            (ok true)
+        )
+    )
+)
+
+;; Read-only Functions
+
+;; Gets account balance
+(define-read-only (get-balance (account principal))
+    (ok (default-to u0 (map-get? balances account)))
+)
+
+;; Gets total token supply
+(define-read-only (get-total-supply)
+    (ok (var-get total-supply))
+)
+
+;; Gets proposal details
+(define-read-only (get-proposal (proposal-id uint))
+    (ok (map-get? proposals proposal-id))
+)
