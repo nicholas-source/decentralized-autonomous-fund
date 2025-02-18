@@ -106,3 +106,92 @@
 (define-private (calculate-voting-power (voter principal))
     (default-to u0 (map-get? balances voter))
 )
+
+;; Internal token transfer logic
+(define-private (transfer-tokens (sender principal) (recipient principal) (amount uint))
+    (let (
+        (sender-balance (default-to u0 (map-get? balances sender)))
+        (recipient-balance (default-to u0 (map-get? balances recipient)))
+    )
+        (asserts! (>= sender-balance amount) err-insufficient-balance)
+        (map-set balances sender (- sender-balance amount))
+        (map-set balances recipient (+ recipient-balance amount))
+        (ok true)
+    )
+)
+
+;; Mints new governance tokens
+(define-private (mint-tokens (account principal) (amount uint))
+    (let (
+        (current-balance (default-to u0 (map-get? balances account)))
+    )
+        (map-set balances account (+ current-balance amount))
+        (var-set total-supply (+ (var-get total-supply) amount))
+        (ok true)
+    )
+)
+
+;; Burns governance tokens
+(define-private (burn-tokens (account principal) (amount uint))
+    (let (
+        (current-balance (default-to u0 (map-get? balances account)))
+    )
+        (asserts! (>= current-balance amount) err-insufficient-balance)
+        (map-set balances account (- current-balance amount))
+        (var-set total-supply (- (var-get total-supply) amount))
+        (ok true)
+    )
+)
+
+;; Public Functions
+
+;; Initializes the DAF contract
+(define-public (initialize)
+    (begin
+        (asserts! (is-contract-owner) err-owner-only)
+        (asserts! (not (var-get initialized)) err-already-initialized)
+        (var-set initialized true)
+        (ok true)
+    )
+)
+
+;; Deposits STX tokens into the DAF
+(define-public (deposit (amount uint))
+    (begin
+        (try! (check-initialized))
+        (asserts! (>= amount (var-get minimum-deposit)) err-below-minimum)
+        
+        ;; Transfer STX to contract
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        
+        ;; Update deposit records
+        (map-set deposits tx-sender {
+            amount: amount,
+            lock-until: (+ block-height (var-get lock-period)),
+            last-reward-block: block-height
+        })
+        
+        ;; Mint governance tokens
+        (mint-tokens tx-sender amount)
+    )
+)
+
+;; Withdraws STX tokens from the DAF
+(define-public (withdraw (amount uint))
+    (begin
+        (try! (check-initialized))
+        
+        (let (
+            (deposit-info (unwrap! (map-get? deposits tx-sender) err-unauthorized))
+        )
+            (asserts! (>= block-height (get lock-until deposit-info)) err-locked-period)
+            (asserts! (>= amount u0) err-invalid-amount)
+            
+            ;; Burn governance tokens
+            (try! (burn-tokens tx-sender amount))
+            
+            ;; Return STX to user
+            (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender))
+        )
+    )
+)
